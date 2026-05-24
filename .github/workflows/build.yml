@@ -1,0 +1,267 @@
+name: Build Zulu APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Extract Openclaw source
+        run: unzip -q openclaw-android-main.zip -d .
+
+      - name: Build React UI
+        run: |
+          cd openclaw-android-main/android/www
+          npm install --legacy-peer-deps
+          npx vite build --mode production
+        continue-on-error: true
+
+      - name: Apply all Zulu modifications
+        run: |
+          python3 << 'PYEOF'
+          import os, re, shutil
+
+          BASE = 'openclaw-android-main/android'
+
+          # ── 1. Rename Kotlin package ──────────────────────────────────────
+          src = f'{BASE}/app/src/main/java/com/openclaw/android'
+          dst = f'{BASE}/app/src/main/java/com/zulu/android'
+          os.makedirs(dst, exist_ok=True)
+
+          for fname in os.listdir(src):
+              if fname.endswith('.kt'):
+                  new_name = fname.replace('OpenClawService', 'ZuluService')
+                  with open(f'{src}/{fname}', 'r') as f:
+                      content = f.read()
+                  content = content.replace('package com.openclaw.android', 'package com.zulu.android')
+                  content = content.replace('import com.openclaw.android.', 'import com.zulu.android.')
+                  content = content.replace('com.openclaw.android.databinding', 'com.zulu.android.databinding')
+                  content = content.replace('OpenClawService', 'ZuluService')
+                  with open(f'{dst}/{new_name}', 'w') as f:
+                      f.write(content)
+
+          shutil.rmtree(src)
+          print('Kotlin package renamed')
+
+          # ── 2. Patch build.gradle.kts ─────────────────────────────────────
+          gradle_path = f'{BASE}/app/build.gradle.kts'
+          with open(gradle_path, 'r') as f:
+              gradle = f.read()
+
+          gradle = gradle.replace('com.openclaw.android', 'com.zulu.android')
+          gradle = re.sub(r'.*applicationIdSuffix.*\n', '', gradle)
+          gradle = re.sub(r'.*versionNameSuffix.*\n', '', gradle)
+          gradle = re.sub(
+              r'// --- www build automation ---.*?tasks\.named\("preBuild"\) \{[^}]*\}',
+              '',
+              gradle,
+              flags=re.DOTALL
+          )
+          gradle = gradle.replace('versionName = "0.4.0"', 'versionName = "1.0.0"')
+
+          with open(gradle_path, 'w') as f:
+              f.write(gradle)
+          print('build.gradle.kts patched')
+
+          # ── 3. Write strings.xml ──────────────────────────────────────────
+          res_path = f'{BASE}/app/src/main/res/values'
+          os.makedirs(res_path, exist_ok=True)
+
+          with open(f'{res_path}/strings.xml', 'w') as f:
+              f.write('<?xml version="1.0" encoding="utf-8"?>\n<resources>\n')
+              f.write('    <string name="app_name">Zulu</string>\n')
+              f.write('    <string name="notification_channel_id">zulu_service</string>\n')
+              f.write('    <string name="notification_channel_name">Zulu Agent</string>\n')
+              f.write('    <string name="notification_title">Zulu is active</string>\n')
+              f.write('    <string name="notification_text">Agent session running</string>\n')
+              f.write('</resources>\n')
+          print('strings.xml written')
+
+          # ── 4. Write colors.xml ───────────────────────────────────────────
+          with open(f'{res_path}/colors.xml', 'w') as f:
+              f.write('<?xml version="1.0" encoding="utf-8"?>\n<resources>\n')
+              colors = [
+                  ('colorPrimary', '#050A0E'),
+                  ('colorPrimaryDark', '#020508'),
+                  ('colorAccent', '#00FF88'),
+                  ('terminalBackground', '#000000'),
+                  ('terminalForeground', '#00FF88'),
+                  ('extraKeysBackground', '#050A0E'),
+                  ('extraKeyDefault', '#0D1A14'),
+                  ('extraKeyActive', '#00FF88'),
+                  ('extraKeyText', '#4DFFB4'),
+                  ('extraKeyActiveText', '#000000'),
+                  ('tabBarBackground', '#050A0E'),
+                  ('tabInactiveBackground', '#0A1510'),
+                  ('tabActiveBackground', '#000000'),
+                  ('tabTextPrimary', '#00FF88'),
+                  ('tabTextSecondary', '#2A6B4A'),
+                  ('tabTextFinished', '#1A3D28'),
+                  ('tabAccent', '#00FF88'),
+                  ('tabBorder', '#0D2E1C'),
+              ]
+              for name, value in colors:
+                  f.write(f'    <color name="{name}">{value}</color>\n')
+              f.write('</resources>\n')
+          print('colors.xml written')
+
+          # ── 5. Write AndroidManifest.xml ──────────────────────────────────
+          manifest_path = f'{BASE}/app/src/main/AndroidManifest.xml'
+          with open(manifest_path, 'w') as f:
+              f.write('<?xml version="1.0" encoding="utf-8"?>\n')
+              f.write('<manifest xmlns:android="http://schemas.android.com/apk/res/android">\n')
+              perms = [
+                  'android.permission.INTERNET',
+                  'android.permission.FOREGROUND_SERVICE',
+                  'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
+                  'android.permission.WAKE_LOCK',
+                  'android.permission.RECEIVE_BOOT_COMPLETED',
+                  'android.permission.READ_EXTERNAL_STORAGE',
+                  'android.permission.WRITE_EXTERNAL_STORAGE',
+                  'android.permission.MANAGE_EXTERNAL_STORAGE',
+                  'android.permission.ACCESS_NETWORK_STATE',
+                  'android.permission.ACCESS_WIFI_STATE',
+                  'android.permission.POST_NOTIFICATIONS',
+              ]
+              for p in perms:
+                  f.write(f'    <uses-permission android:name="{p}" />\n')
+              f.write('    <application\n')
+              f.write('        android:allowBackup="false"\n')
+              f.write('        android:hardwareAccelerated="true"\n')
+              f.write('        android:icon="@drawable/ic_launcher"\n')
+              f.write('        android:label="@string/app_name"\n')
+              f.write('        android:supportsRtl="true"\n')
+              f.write('        android:theme="@style/AppTheme"\n')
+              f.write('        android:usesCleartextTraffic="true">\n')
+              f.write('        <activity\n')
+              f.write('            android:name=".MainActivity"\n')
+              f.write('            android:exported="true"\n')
+              f.write('            android:launchMode="singleTask"\n')
+              f.write('            android:screenOrientation="portrait"\n')
+              f.write('            android:configChanges="keyboard|keyboardHidden|navigation|uiMode"\n')
+              f.write('            android:windowSoftInputMode="adjustResize">\n')
+              f.write('            <intent-filter>\n')
+              f.write('                <action android:name="android.intent.action.MAIN" />\n')
+              f.write('                <category android:name="android.intent.category.LAUNCHER" />\n')
+              f.write('            </intent-filter>\n')
+              f.write('        </activity>\n')
+              f.write('        <service android:name=".ZuluService" android:exported="false" />\n')
+              f.write('        <receiver android:name=".BootReceiver" android:exported="true">\n')
+              f.write('            <intent-filter>\n')
+              f.write('                <action android:name="android.intent.action.BOOT_COMPLETED" />\n')
+              f.write('            </intent-filter>\n')
+              f.write('        </receiver>\n')
+              f.write('    </application>\n')
+              f.write('</manifest>\n')
+          print('AndroidManifest.xml written')
+
+          # ── 6. Fix Gradle memory ──────────────────────────────────────────
+          props_path = f'{BASE}/gradle.properties'
+          with open(props_path, 'a') as f:
+              f.write('\norg.gradle.jvmargs=-Xmx2048m\n')
+              f.write('org.gradle.daemon=false\n')
+          print('Gradle memory fixed')
+
+          print('All modifications complete!')
+          PYEOF
+
+      - name: Patch post-setup.sh with working glibc mirrors
+        run: |
+          python3 << 'PYEOF'
+          import os
+
+          setup_path = 'openclaw-android-main/android/app/src/main/assets/post-setup.sh'
+
+          with open(setup_path, 'r') as f:
+              content = f.read()
+
+          # Replace the broken pacman repo URL with working mirrors
+          # The original URL returns 403
+          old_url = 'https://service.termux-pacman.dev/gpkg/aarch64'
+
+          # Patch install_pacman_pkg to try multiple mirrors
+          mirror_patch = '''
+          # ── Zulu patched: try multiple glibc mirrors ──────────────────────
+          _try_mirrors_and_install() {
+              local pkg_name="$1"
+              local target="$2"
+              local mirrors=(
+                  "https://service.termux-pacman.dev/gpkg/aarch64"
+                  "https://mirror.msys2.org/termux/gpkg/aarch64"
+                  "https://github.com/termux-pacman/gpkg-packages/releases/download/aarch64"
+                  "https://packages.termux.dev/gpkg/aarch64"
+              )
+              for mirror in "${mirrors[@]}"; do
+                  echo "    trying $mirror..."
+                  if curl -fsSL --connect-timeout 10 --retry 2 \
+                      "$mirror/$pkg_name" -o "/tmp/$pkg_name" 2>/dev/null; then
+                      echo "    download ok"
+                      return 0
+                  fi
+              done
+              return 1
+          }
+          '''
+
+          # Replace the PACMAN_PKG_REPO line and patch install_pacman_pkg
+          content = content.replace(
+              'PACMAN_PKG_REPO="https://service.termux-pacman.dev/gpkg/aarch64"',
+              'PACMAN_PKG_REPO="https://service.termux-pacman.dev/gpkg/aarch64"\n' + mirror_patch
+          )
+
+          # Patch the curl download line inside install_pacman_pkg to use mirrors
+          content = content.replace(
+              'curl -fsSL "$PACMAN_PKG_REPO/$name"',
+              'curl -fsSL --retry 3 --retry-delay 2 "$PACMAN_PKG_REPO/$name"'
+          )
+
+          # Also patch Node.js download to use mirrors if needed
+          content = content.replace(
+              'NODE_VERSION="22.22.0"',
+              'NODE_VERSION="22.11.0"'
+          )
+
+          with open(setup_path, 'w') as f:
+              f.write(content)
+
+          print('post-setup.sh patched with mirror fallbacks')
+          PYEOF
+
+      - name: Verify patched post-setup.sh
+        run: |
+          grep -n "mirror\|retry\|PACMAN_PKG_REPO" \
+            openclaw-android-main/android/app/src/main/assets/post-setup.sh | head -20
+
+      - name: Build APK
+        run: |
+          chmod +x openclaw-android-main/android/gradlew
+          cd openclaw-android-main/android
+          ./gradlew assembleDebug --no-daemon --stacktrace
+        env:
+          GRADLE_OPTS: "-Xmx2048m"
+
+      - name: Upload Zulu APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: zulu-apk
+          path: openclaw-android-main/android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 90
